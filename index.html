@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fuzzy Logic Trading Engine</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header class="app-header">
+    <h1>Fuzzy Logic Trading Engine</h1>
+    <p>Market Sentiment & Technical Inference System</p>
+  </header>
+
+  <main class="dashboard-container">
+    
+    <!-- Left Column: User Inputs -->
+    <section class="card input-section">
+      <h2>Market Inputs</h2>
+      
+      <!-- RSI Slider Control -->
+      <div class="input-group">
+        <label for="rsi-input">
+          Technical Momentum (RSI): <span id="rsi-val">50</span>
+        </label>
+        <input type="range" id="rsi-input" min="0" max="100" value="50" step="1">
+        <div class="range-labels">
+          <span>0 (Oversold)</span>
+          <span>50 (Neutral)</span>
+          <span>100 (Overbought)</span>
+        </div>
+      </div>
+
+      <!-- Market Sentiment Slider Control -->
+      <div class="input-group">
+        <label for="sentiment-input">
+          Market Sentiment Score: <span id="sentiment-val">0</span>
+        </label>
+        <input type="range" id="sentiment-input" min="-100" max="100" value="0" step="1">
+        <div class="range-labels">
+          <span>-100 (Bearish)</span>
+          <span>0 (Neutral)</span>
+          <span>+100 (Bullish)</span>
+        </div>
+      </div>
+
+      <button id="analyze-btn" class="primary-btn">Analyze & Execute</button>
+    </section>
+
+    <!-- Right Column: Fuzzy Outputs -->
+    <section class="card output-section">
+      <h2>Inference Results</h2>
+
+      <!-- Step 1: Fuzzification Degrees -->
+      <div class="fuzzification-display">
+        <h3>Membership Degrees ($\mu$)</h3>
+        <div class="degree-grid">
+          <div>
+            <strong>RSI:</strong>
+            <p>Oversold: <span id="rsi-oversold-deg">0.00</span></p>
+            <p>Neutral: <span id="rsi-neutral-deg">1.00</span></p>
+            <p>Overbought: <span id="rsi-overbought-deg">0.00</span></p>
+          </div>
+          <div>
+            <strong>Sentiment:</strong>
+            <p>Bearish: <span id="sent-bearish-deg">0.00</span></p>
+            <p>Neutral: <span id="sent-neutral-deg">1.00</span></p>
+            <p>Bullish: <span id="sent-bullish-deg">0.00</span></p>
+          </div>
+        </div>
+      </div>
+
+      <hr>
+
+      <!-- Step 2: Defuzzified Final Output -->
+      <div class="result-display">
+        <h3>Final Trading Signal</h3>
+        <div class="gauge-placeholder">
+          <!-- Dynamic action score and visual bar -->
+          <div id="score-meter" class="score-meter">
+            <span id="final-score">0</span>
+          </div>
+        </div>
+        <div id="recommendation-badge" class="badge hold">
+          Hold / Neutral
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
