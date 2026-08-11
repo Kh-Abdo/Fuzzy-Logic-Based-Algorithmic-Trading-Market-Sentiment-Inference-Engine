@@ -1,95 +1,165 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fr">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fuzzy Logic Trading Engine</title>
-  <link rel="stylesheet" href="style.css">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fuzzy Logic Trading Engine — Market Sentiment Inference</title>
+<meta name="description" content="Moteur d'inférence floue combinant RSI et sentiment de marché pour générer un signal de trading (Mamdani, défuzzification par centroïde)." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+<link rel="stylesheet" href="style.css" />
 </head>
 <body>
+<div class="app">
 
-  <header class="app-header">
-    <h1>Fuzzy Logic Trading Engine</h1>
-    <p>Market Sentiment & Technical Inference System</p>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">FZ</span>
+      <div class="brand-text">
+        <h1>Fuzzy Logic Trading Engine</h1>
+        <p>Market Sentiment Inference &amp; Algorithmic Signal Engine</p>
+      </div>
+    </div>
+    <div class="session-status">
+      <span class="status-dot" id="statusDot" aria-hidden="true"></span>
+      <span id="statusText">ENGINE READY</span>
+    </div>
   </header>
 
-  <main class="dashboard-container">
-    
-    <!-- Left Column: User Inputs -->
-    <section class="card input-section">
-      <h2>Market Inputs</h2>
-      
-      <!-- RSI Slider Control -->
-      <div class="input-group">
-        <label for="rsi-input">
-          Technical Momentum (RSI): <span id="rsi-val">50</span>
-        </label>
-        <input type="range" id="rsi-input" min="0" max="100" value="50" step="1">
-        <div class="range-labels">
-          <span>0 (Oversold)</span>
-          <span>50 (Neutral)</span>
-          <span>100 (Overbought)</span>
-        </div>
-      </div>
+  <main class="pipeline">
 
-      <!-- Market Sentiment Slider Control -->
-      <div class="input-group">
-        <label for="sentiment-input">
-          Market Sentiment Score: <span id="sentiment-val">0</span>
-        </label>
-        <input type="range" id="sentiment-input" min="-100" max="100" value="0" step="1">
-        <div class="range-labels">
-          <span>-100 (Bearish)</span>
-          <span>0 (Neutral)</span>
-          <span>+100 (Bullish)</span>
-        </div>
+    <!-- ============ STAGE 01 — MARKET INPUTS ============ -->
+    <section class="stage" id="stageInputs" aria-labelledby="stage01Title">
+      <div class="stage-head">
+        <span class="stage-num" aria-hidden="true">01</span>
+        <h2 id="stage01Title">Market Inputs</h2>
       </div>
+      <div class="stage-body">
 
-      <button id="analyze-btn" class="primary-btn">Analyze & Execute</button>
+        <div class="control">
+          <div class="control-top">
+            <label for="rsiSlider">RSI <span class="control-sub">Relative Strength Index</span></label>
+            <span class="readout" id="rsiValue">50</span>
+          </div>
+          <input type="range" id="rsiSlider" min="0" max="100" step="1" value="50" />
+          <div class="scale-labels">
+            <span>0 · Survendu</span><span>50 · Neutre</span><span>100 · Suracheté</span>
+          </div>
+        </div>
+
+        <div class="control">
+          <div class="control-top">
+            <label for="sentSlider">Sentiment <span class="control-sub">Market Sentiment Index</span></label>
+            <span class="readout" id="sentValue">0</span>
+          </div>
+          <input type="range" id="sentSlider" min="-100" max="100" step="1" value="0" />
+          <div class="scale-labels">
+            <span>−100 · Baissier</span><span>0 · Neutre</span><span>+100 · Haussier</span>
+          </div>
+        </div>
+
+        <button type="button" class="analyze-btn" id="analyzeBtn">
+          <span class="btn-icon" aria-hidden="true">⚡</span>Analyser &amp; Exécuter
+        </button>
+
+        <div class="preset-row">
+          <span class="preset-label">Scénarios rapides</span>
+          <div class="preset-buttons" id="presetButtons"></div>
+        </div>
+
+      </div>
     </section>
 
-    <!-- Right Column: Fuzzy Outputs -->
-    <section class="card output-section">
-      <h2>Inference Results</h2>
+    <div class="connector" aria-hidden="true">→</div>
 
-      <!-- Step 1: Fuzzification Degrees -->
-      <div class="fuzzification-display">
-        <h3>Membership Degrees ($\mu$)</h3>
-        <div class="degree-grid">
-          <div>
-            <strong>RSI:</strong>
-            <p>Oversold: <span id="rsi-oversold-deg">0.00</span></p>
-            <p>Neutral: <span id="rsi-neutral-deg">1.00</span></p>
-            <p>Overbought: <span id="rsi-overbought-deg">0.00</span></p>
-          </div>
-          <div>
-            <strong>Sentiment:</strong>
-            <p>Bearish: <span id="sent-bearish-deg">0.00</span></p>
-            <p>Neutral: <span id="sent-neutral-deg">1.00</span></p>
-            <p>Bullish: <span id="sent-bullish-deg">0.00</span></p>
-          </div>
-        </div>
+    <!-- ============ STAGE 02 — FUZZIFICATION ============ -->
+    <section class="stage" id="stageFuzzification" aria-labelledby="stage02Title">
+      <div class="stage-head">
+        <span class="stage-num" aria-hidden="true">02</span>
+        <h2 id="stage02Title">Fuzzification</h2>
       </div>
+      <div class="stage-body">
 
-      <hr>
+        <div class="chart-block">
+          <h3>μ(RSI) — Degrés d'appartenance</h3>
+          <svg id="rsiChart" viewBox="0 0 360 130" class="mf-chart" role="img" aria-label="Fonctions d'appartenance du RSI"></svg>
+          <div class="degree-list" id="rsiDegreeList"></div>
+        </div>
 
-      <!-- Step 2: Defuzzified Final Output -->
-      <div class="result-display">
-        <h3>Final Trading Signal</h3>
-        <div class="gauge-placeholder">
-          <!-- Dynamic action score and visual bar -->
-          <div id="score-meter" class="score-meter">
-            <span id="final-score">0</span>
+        <div class="chart-block">
+          <h3>μ(Sentiment) — Degrés d'appartenance</h3>
+          <svg id="sentChart" viewBox="0 0 360 130" class="mf-chart" role="img" aria-label="Fonctions d'appartenance du sentiment"></svg>
+          <div class="degree-list" id="sentDegreeList"></div>
+        </div>
+
+      </div>
+    </section>
+
+    <div class="connector" aria-hidden="true">→</div>
+
+    <!-- ============ STAGE 03 — RULE INFERENCE ============ -->
+    <section class="stage" id="stageRules" aria-labelledby="stage03Title">
+      <div class="stage-head">
+        <span class="stage-num" aria-hidden="true">03</span>
+        <h2 id="stage03Title">Rule Inference</h2>
+      </div>
+      <div class="stage-body">
+
+        <p class="stage-note">Base de 9 règles (3×3) — AND = MIN, agrégation = MAX.</p>
+
+        <div id="ruleMatrixContainer"></div>
+
+        <div class="active-rules" id="activeRulesList"></div>
+
+      </div>
+    </section>
+
+    <div class="connector" aria-hidden="true">→</div>
+
+    <!-- ============ STAGE 04 — DEFUZZIFICATION ============ -->
+    <section class="stage" id="stageOutput" aria-labelledby="stage04Title">
+      <div class="stage-head">
+        <span class="stage-num" aria-hidden="true">04</span>
+        <h2 id="stage04Title">Defuzzification</h2>
+      </div>
+      <div class="stage-body">
+
+        <div class="fusion-strip-wrap">
+          <div class="fusion-strip" id="fusionStrip">
+            <div class="fusion-marker" id="fusionMarker"></div>
           </div>
+          <div class="fusion-ticks" id="fusionTicks"></div>
         </div>
-        <div id="recommendation-badge" class="badge hold">
-          Hold / Neutral
+
+        <div class="score-block">
+          <span class="score-value" id="scoreValue">0.0</span>
+          <span class="score-unit">/ 100 · Signal Score</span>
         </div>
+
+        <div class="recommendation" id="recommendation">
+          <span class="rec-badge" id="recBadge">HOLD</span>
+          <p class="rec-text" id="recText">Ajustez le RSI et le Sentiment pour générer une recommandation.</p>
+        </div>
+
+        <div class="chart-block">
+          <h3>Ensemble flou de sortie agrégé</h3>
+          <svg id="outputChart" viewBox="0 0 360 150" class="mf-chart" role="img" aria-label="Ensemble flou de sortie agrégé et centroïde"></svg>
+        </div>
+
       </div>
     </section>
 
   </main>
 
-  <script src="script.js"></script>
+  <footer class="app-footer">
+    <p>Inférence de Mamdani · Défuzzification par Centre de Gravité (Centroïde) · Moteur 100% Vanilla JavaScript</p>
+  </footer>
+
+</div>
+
+<script src="script.js"></script>
 </body>
 </html>
