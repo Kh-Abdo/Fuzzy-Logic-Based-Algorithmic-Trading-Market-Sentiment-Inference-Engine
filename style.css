@@ -308,6 +308,19 @@ input[type="range"]::-moz-range-track {
 .analyze-btn:active { transform: scale(0.98); }
 .btn-icon { font-size: 0.95rem; }
 
+.input-error {
+  display: none;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--red);
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.input-error.show { display: block; }
+
 .preset-row { display: flex; flex-direction: column; gap: 8px; }
 .preset-label {
   font-family: var(--font-mono);
