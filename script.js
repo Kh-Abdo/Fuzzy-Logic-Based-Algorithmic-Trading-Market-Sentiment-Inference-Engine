@@ -87,23 +87,23 @@ function evalSet(setDef, x) {
    ----------------------------------------------------------------------------- */
 
 const RSI_SETS = {
-  oversold: { type: 'trap', params: [0, 0, 30, 50], label: 'Survendu' },
-  neutral: { type: 'tri', params: [30, 50, 70], label: 'Neutre' },
-  overbought: { type: 'trap', params: [50, 70, 100, 100], label: 'Suracheté' },
+  oversold: { type: 'trap', params: [0, 0, 25, 40], label: 'Survendu' },
+  neutral: { type: 'tri', params: [25, 50, 75], label: 'Neutre' },
+  overbought: { type: 'trap', params: [60, 75, 100, 100], label: 'Suracheté' },
 };
 
 const SENT_SETS = {
-  bearish: { type: 'trap', params: [-100, -100, -50, -10], label: 'Baissier' },
-  neutral: { type: 'tri', params: [-30, 0, 30], label: 'Neutre' },
-  bullish: { type: 'trap', params: [10, 50, 100, 100], label: 'Haussier' },
+  bearish: { type: 'trap', params: [-100, -100, -50, -20], label: 'Baissier' },
+  neutral: { type: 'tri', params: [-50, 0, 50], label: 'Neutre' },
+  bullish: { type: 'trap', params: [20, 50, 100, 100], label: 'Haussier' },
 };
 
 const OUTPUT_SETS = {
-  strongSell: { type: 'trap', params: [-100, -100, -70, -40], label: 'Vente Forte', short: 'S.SELL' },
-  sell: { type: 'tri', params: [-55, -30, -5], label: 'Vente', short: 'SELL' },
-  hold: { type: 'tri', params: [-15, 0, 15], label: 'Conserver', short: 'HOLD' },
-  buy: { type: 'tri', params: [5, 30, 55], label: 'Achat', short: 'BUY' },
-  strongBuy: { type: 'trap', params: [40, 70, 100, 100], label: 'Achat Fort', short: 'S.BUY' },
+  strongSell: { type: 'trap', params: [-100, -100, -80, -50], label: 'Vente Forte', short: 'S.SELL' },
+  sell: { type: 'tri', params: [-70, -40, -10], label: 'Vente', short: 'SELL' },
+  hold: { type: 'tri', params: [-20, 0, 20], label: 'Conserver', short: 'HOLD' },
+  buy: { type: 'tri', params: [10, 40, 70], label: 'Achat', short: 'BUY' },
+  strongBuy: { type: 'trap', params: [50, 80, 100, 100], label: 'Achat Fort', short: 'S.BUY' },
 };
 
 /* Attribution des couleurs : palette "technique" (bleu/violet) pour le RSI,
