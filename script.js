@@ -479,6 +479,7 @@ function updateFusionMarker(score) {
   const marker = document.getElementById('fusionMarker');
   const pct = clamp(((score - -100) / 200) * 100, 0, 100);
   marker.style.left = `${pct}%`;
+  marker.style.opacity = '1';
 }
 
 function updateRecommendation(score, classification) {
@@ -517,9 +518,14 @@ function buildPresetButtons() {
 
   container.querySelectorAll('.preset-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
+      // Un clic sur un scénario rapide est, comme le bouton "Exécuter", une
+      // action explicite de l'utilisateur : il est donc légitime qu'il
+      // déclenche directement l'analyse (contrairement au simple glissement
+      // d'un slider, qui ne doit jamais lancer le calcul).
       const p = PRESETS[Number(btn.dataset.index)];
       document.getElementById('rsiSlider').value = String(p.rsi);
       document.getElementById('sentSlider').value = String(p.sent);
+      updateReadouts();
       runAnalysis();
     });
   });
@@ -529,14 +535,71 @@ function buildPresetButtons() {
    10. BOUCLE PRINCIPALE D'ANALYSE
    ----------------------------------------------------------------------------- */
 
+/** Met à jour uniquement les lectures numériques (readouts) affichées à côté
+ *  des sliders. Appelée en continu pendant le glisser-déposer, SANS déclencher
+ *  le moteur d'inférence flou (fuzzification / règles / centroïde). */
+function updateReadouts() {
+  const rsi = Number(document.getElementById('rsiSlider').value);
+  const sent = Number(document.getElementById('sentSlider').value);
+  document.getElementById('rsiValue').textContent = String(rsi);
+  document.getElementById('sentValue').textContent = sent > 0 ? `+${sent}` : String(sent);
+}
+
+/** Valide les entrées avant exécution. Avec des <input type="range">, le
+ *  navigateur ne peut normalement pas produire de valeur vide ou hors bornes,
+ *  mais ce garde-fou reste nécessaire pour la robustesse (valeur non
+ *  numérique, élément manquant, manipulation programmatique, etc.). */
+function validateInputs(rsiRaw, sentRaw) {
+  if (rsiRaw === '' || rsiRaw === null || sentRaw === '' || sentRaw === null) {
+    return { valid: false, message: 'Veuillez renseigner le RSI et le Sentiment avant d’exécuter l’analyse.' };
+  }
+  const rsi = Number(rsiRaw);
+  const sent = Number(sentRaw);
+  if (Number.isNaN(rsi) || Number.isNaN(sent)) {
+    return { valid: false, message: 'Les valeurs saisies doivent être numériques.' };
+  }
+  if (rsi < 0 || rsi > 100) {
+    return { valid: false, message: 'Le RSI doit être compris entre 0 et 100.' };
+  }
+  if (sent < -100 || sent > 100) {
+    return { valid: false, message: 'Le Sentiment doit être compris entre -100 et +100.' };
+  }
+  return { valid: true, rsi, sent };
+}
+
+function showInputError(message) {
+  const el = document.getElementById('inputError');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.add('show');
+}
+
+function clearInputError() {
+  const el = document.getElementById('inputError');
+  if (!el) return;
+  el.textContent = '';
+  el.classList.remove('show');
+}
+
+/** Point d'entrée UNIQUE du moteur d'inférence floue. N'est déclenché que par
+ *  une action utilisateur explicite : le bouton "Analyser & Exécuter" ou un
+ *  scénario rapide (presets), jamais par le déplacement des sliders ni par
+ *  le chargement de la page. */
 function runAnalysis() {
   const rsiSlider = document.getElementById('rsiSlider');
   const sentSlider = document.getElementById('sentSlider');
-  const rsi = Number(rsiSlider.value);
-  const sent = Number(sentSlider.value);
 
-  document.getElementById('rsiValue').textContent = String(rsi);
-  document.getElementById('sentValue').textContent = sent > 0 ? `+${sent}` : String(sent);
+  // Étape 0 — Validation des entrées
+  const validation = validateInputs(rsiSlider.value, sentSlider.value);
+  if (!validation.valid) {
+    showInputError(validation.message);
+    return; // Ne pas exécuter le moteur flou ; résultat précédent conservé.
+  }
+  clearInputError();
+
+  const { rsi, sent } = validation;
+
+  updateReadouts();
 
   // Étape 1 — Fuzzification
   const rsiDeg = fuzzify(RSI_SETS, rsi);
@@ -571,6 +634,36 @@ function runAnalysis() {
 }
 
 /* -----------------------------------------------------------------------------
+   10bis. ÉTAT INITIAL (IDLE) — avant toute exécution
+   ----------------------------------------------------------------------------- */
+
+/** Affiche un état "en attente" au chargement de la page : les courbes
+ *  d'appartenance de référence sont visibles (pédagogique), mais aucun
+ *  calcul flou (fuzzification / règles / centroïde) n'a encore été exécuté.
+ *  Satisfait l'exigence "aucun calcul au chargement de la page". */
+function renderIdleState() {
+  updateReadouts();
+
+  // Stage 02 — courbes de référence sans marqueur de valeur courante (pas de fuzzification effectuée)
+  document.getElementById('rsiChart').innerHTML = buildMFChartSVG(RSI_SETS, RSI_COLOR_KEY, 0, 100, null);
+  document.getElementById('sentChart').innerHTML = buildMFChartSVG(SENT_SETS, SENT_COLOR_KEY, -100, 100, null);
+  document.getElementById('rsiDegreeList').innerHTML = '<div class="active-rules-empty">En attente d’exécution — cliquez sur « Analyser &amp; Exécuter ».</div>';
+  document.getElementById('sentDegreeList').innerHTML = '<div class="active-rules-empty">En attente d’exécution — cliquez sur « Analyser &amp; Exécuter ».</div>';
+
+  // Stage 03 — matrice construite mais aucune règle mise en évidence
+  document.getElementById('activeRulesList').innerHTML = '<div class="active-rules-empty">Aucune analyse effectuée pour le moment.</div>';
+
+  // Stage 04 — pas de score ni de recommandation tant qu'aucune exécution n'a eu lieu
+  document.getElementById('fusionMarker').style.opacity = '0';
+  document.getElementById('scoreValue').textContent = '—';
+  document.getElementById('recBadge').textContent = 'EN ATTENTE';
+  document.getElementById('recBadge').style.backgroundColor = COLORS.lineSoft;
+  document.getElementById('recBadge').style.color = COLORS.mist;
+  document.getElementById('recText').textContent = 'Réglez le RSI et le Sentiment, puis cliquez sur « Analyser & Exécuter » pour lancer l’inférence floue.';
+  document.getElementById('outputChart').innerHTML = '';
+}
+
+/* -----------------------------------------------------------------------------
    11. INITIALISATION
    ----------------------------------------------------------------------------- */
 
@@ -597,11 +690,16 @@ function init() {
   buildFusionAxis();
   buildPresetButtons();
 
-  document.getElementById('rsiSlider').addEventListener('input', runAnalysis);
-  document.getElementById('sentSlider').addEventListener('input', runAnalysis);
+  // Les sliders mettent seulement à jour leur lecture numérique en direct ;
+  // ils ne déclenchent JAMAIS le moteur d'inférence flou.
+  document.getElementById('rsiSlider').addEventListener('input', updateReadouts);
+  document.getElementById('sentSlider').addEventListener('input', updateReadouts);
+
+  // Seul le bouton "Analyser & Exécuter" déclenche le calcul.
   document.getElementById('analyzeBtn').addEventListener('click', runAnalysis);
 
-  runAnalysis();
+  // Aucun calcul au chargement de la page — état d'attente uniquement.
+  renderIdleState();
 }
 
 document.addEventListener('DOMContentLoaded', init);
