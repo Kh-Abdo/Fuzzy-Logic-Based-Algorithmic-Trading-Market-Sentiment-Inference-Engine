@@ -1,167 +1,157 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Fuzzy Logic Trading Engine — Market Sentiment Inference</title>
-<meta name="description" content="Moteur d'inférence floue combinant RSI et sentiment de marché pour générer un signal de trading (Mamdani, défuzzification par centroïde)." />
-
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-
-<link rel="stylesheet" href="style.css" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Fuzzy Logic Trading Engine</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="app">
+  <main class="app">
 
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">FZ</span>
-      <div class="brand-text">
-        <h1>Fuzzy Logic Trading Engine</h1>
-        <p>Market Sentiment Inference &amp; Algorithmic Signal Engine</p>
+    <header class="masthead">
+      <h1>Fuzzy Logic Trading Engine</h1>
+      <p>Fuses RSI momentum and market sentiment into one trading signal between &minus;100 and +100.</p>
+    </header>
+
+    <!-- Instrument panel: two input dials feed one output gauge -->
+    <section class="cockpit glass" id="cockpit" aria-label="Instrument panel">
+
+      <article class="instrument dial" id="rsiDial">
+        <header class="inst-head">
+          <h2>RSI momentum</h2>
+          <p>Relative Strength Index, 0 to 100</p>
+        </header>
+        <svg class="dial-svg" id="rsiSvg" viewBox="0 0 200 200" aria-hidden="true" focusable="false"></svg>
+        <div class="slider-block">
+          <label class="sr-only" for="rsiInput">RSI value</label>
+          <input id="rsiInput" type="range" min="0" max="100" step="1" value="50">
+          <div class="scale"><span>0 oversold</span><span>100 overbought</span></div>
+        </div>
+      </article>
+
+      <article class="instrument gauge" id="signalGauge">
+        <header class="inst-head">
+          <h2>Trading signal</h2>
+          <p>Centroid of the fuzzy output, &minus;100 to +100</p>
+        </header>
+        <svg id="gaugeSvg" viewBox="0 0 400 230" role="img" aria-label="Trading signal gauge, no result yet" focusable="false">
+          <g id="gZones"></g>
+          <g id="gTicks"></g>
+          <g id="gLabels"></g>
+          <g id="gNeedle" class="needle">
+            <path class="needle-blade" d="M195 202 L200 80 L205 202 Z"/>
+            <circle class="hub" cx="200" cy="200" r="14"/>
+            <circle class="hub-core" cx="200" cy="200" r="5"/>
+          </g>
+        </svg>
+        <div class="led-block">
+          <output id="ledScore" class="led">--.--</output>
+          <p id="ledZone" class="led-zone">Awaiting analysis</p>
+        </div>
+      </article>
+
+      <article class="instrument dial" id="sentDial">
+        <header class="inst-head">
+          <h2>Market sentiment</h2>
+          <p>Sentiment index, &minus;100 to +100</p>
+        </header>
+        <svg class="dial-svg" id="sentSvg" viewBox="0 0 200 200" aria-hidden="true" focusable="false"></svg>
+        <div class="slider-block">
+          <label class="sr-only" for="sentInput">Market sentiment value</label>
+          <input id="sentInput" type="range" min="-100" max="100" step="1" value="0">
+          <div class="scale"><span>&minus;100 bearish</span><span>+100 bullish</span></div>
+        </div>
+      </article>
+
+    </section>
+
+    <section class="controls" aria-label="Run the analysis">
+      <button id="runBtn" class="run" type="button">Analyser &amp; Ex&eacute;cuter</button>
+      <p id="statusLine" class="status">Set the two dials, then run the analysis. Nothing is calculated until you do.</p>
+      <div class="presets" role="group" aria-label="Example scenarios">
+        <span class="presets-label">Example scenarios</span>
+        <button class="chip" type="button" data-rsi="15" data-sent="85">Strong buy</button>
+        <button class="chip" type="button" data-rsi="88" data-sent="-85">Strong sell</button>
+        <button class="chip" type="button" data-rsi="50" data-sent="0">Neutral</button>
+        <button class="chip" type="button" data-rsi="20" data-sent="-80">Conflicting signals</button>
+        <button class="chip" type="button" data-rsi="40" data-sent="20">Transition zone</button>
       </div>
-    </div>
-    <div class="session-status">
-      <span class="status-dot" id="statusDot" aria-hidden="true"></span>
-      <span id="statusText">ENGINE READY</span>
-    </div>
-  </header>
+      <p id="srStatus" class="sr-only" aria-live="polite"></p>
+    </section>
 
-  <main class="pipeline">
-
-    <!-- ============ STAGE 01 — MARKET INPUTS ============ -->
-    <section class="stage" id="stageInputs" aria-labelledby="stage01Title">
-      <div class="stage-head">
-        <span class="stage-num" aria-hidden="true">01</span>
-        <h2 id="stage01Title">Market Inputs</h2>
+    <!-- Pipeline storyboard: each stage appears as the engine reaches it -->
+    <section class="pipeline" aria-labelledby="pipeTitle">
+      <div class="pipe-head">
+        <h2 id="pipeTitle">Inference pipeline</h2>
+        <p>Mamdani inference in five stages</p>
       </div>
-      <div class="stage-body">
 
-        <div class="control">
-          <div class="control-top">
-            <label for="rsiSlider">RSI <span class="control-sub">Relative Strength Index</span></label>
-            <span class="readout" id="rsiValue">50</span>
-          </div>
-          <input type="range" id="rsiSlider" min="0" max="100" step="1" value="50" />
-          <div class="scale-labels">
-            <span>0 · Survendu</span><span>50 · Neutre</span><span>100 · Suracheté</span>
-          </div>
-        </div>
+      <ol class="stepper" id="stepper">
+        <li><span class="step-dot">1</span><span class="step-name">Fuzzify</span></li>
+        <li><span class="step-dot">2</span><span class="step-name">Evaluate</span></li>
+        <li><span class="step-dot">3</span><span class="step-name">Aggregate</span></li>
+        <li><span class="step-dot">4</span><span class="step-name">Defuzzify</span></li>
+        <li><span class="step-dot">5</span><span class="step-name">Signal</span></li>
+      </ol>
 
-        <div class="control">
-          <div class="control-top">
-            <label for="sentSlider">Sentiment <span class="control-sub">Market Sentiment Index</span></label>
-            <span class="readout" id="sentValue">0</span>
-          </div>
-          <input type="range" id="sentSlider" min="-100" max="100" step="1" value="0" />
-          <div class="scale-labels">
-            <span>−100 · Baissier</span><span>0 · Neutre</span><span>+100 · Haussier</span>
-          </div>
-        </div>
+      <div class="stages" id="stages">
+        <article class="stage" data-span="2">
+          <header class="stage-head">
+            <h3>Fuzzification</h3>
+            <p>Each input gets a degree between 0 and 1 in every linguistic set.</p>
+          </header>
+          <p class="stage-wait">Appears when the analysis runs.</p>
+          <div class="stage-body" id="stage0"></div>
+        </article>
 
-        <button type="button" class="analyze-btn" id="analyzeBtn">
-          <span class="btn-icon" aria-hidden="true">⚡</span>Analyser &amp; Exécuter
-        </button>
+        <article class="stage">
+          <header class="stage-head">
+            <h3>Rule evaluation</h3>
+            <p>Nine rules pair an RSI set with a sentiment set. AND takes the smaller degree.</p>
+          </header>
+          <p class="stage-wait">Appears when the analysis runs.</p>
+          <div class="stage-body" id="stage1"></div>
+        </article>
 
-        <div class="input-error" id="inputError" role="alert" aria-live="assertive"></div>
+        <article class="stage">
+          <header class="stage-head">
+            <h3>Aggregation</h3>
+            <p>Each output set is cut at its rule strength, then the cuts are merged with MAX.</p>
+          </header>
+          <p class="stage-wait">Appears when the analysis runs.</p>
+          <div class="stage-body" id="stage2"></div>
+        </article>
 
-        <div class="preset-row">
-          <span class="preset-label">Scénarios rapides</span>
-          <div class="preset-buttons" id="presetButtons"></div>
-        </div>
+        <article class="stage">
+          <header class="stage-head">
+            <h3>Defuzzification</h3>
+            <p>The centre of gravity of the merged shape becomes one number.</p>
+          </header>
+          <p class="stage-wait">Appears when the analysis runs.</p>
+          <div class="stage-body" id="stage3"></div>
+        </article>
 
+        <article class="stage">
+          <header class="stage-head">
+            <h3>Execution signal</h3>
+            <p>The score is read against the five execution zones.</p>
+          </header>
+          <p class="stage-wait">Appears when the analysis runs.</p>
+          <div class="stage-body" id="stage4"></div>
+        </article>
       </div>
     </section>
 
-    <div class="connector" aria-hidden="true">→</div>
-
-    <!-- ============ STAGE 02 — FUZZIFICATION ============ -->
-    <section class="stage" id="stageFuzzification" aria-labelledby="stage02Title">
-      <div class="stage-head">
-        <span class="stage-num" aria-hidden="true">02</span>
-        <h2 id="stage02Title">Fuzzification</h2>
-      </div>
-      <div class="stage-body">
-
-        <div class="chart-block">
-          <h3>μ(RSI) — Degrés d'appartenance</h3>
-          <svg id="rsiChart" viewBox="0 0 360 130" class="mf-chart" role="img" aria-label="Fonctions d'appartenance du RSI"></svg>
-          <div class="degree-list" id="rsiDegreeList"></div>
-        </div>
-
-        <div class="chart-block">
-          <h3>μ(Sentiment) — Degrés d'appartenance</h3>
-          <svg id="sentChart" viewBox="0 0 360 130" class="mf-chart" role="img" aria-label="Fonctions d'appartenance du sentiment"></svg>
-          <div class="degree-list" id="sentDegreeList"></div>
-        </div>
-
-      </div>
-    </section>
-
-    <div class="connector" aria-hidden="true">→</div>
-
-    <!-- ============ STAGE 03 — RULE INFERENCE ============ -->
-    <section class="stage" id="stageRules" aria-labelledby="stage03Title">
-      <div class="stage-head">
-        <span class="stage-num" aria-hidden="true">03</span>
-        <h2 id="stage03Title">Rule Inference</h2>
-      </div>
-      <div class="stage-body">
-
-        <p class="stage-note">Base de 9 règles (3×3) — AND = MIN, agrégation = MAX.</p>
-
-        <div id="ruleMatrixContainer"></div>
-
-        <div class="active-rules" id="activeRulesList"></div>
-
-      </div>
-    </section>
-
-    <div class="connector" aria-hidden="true">→</div>
-
-    <!-- ============ STAGE 04 — DEFUZZIFICATION ============ -->
-    <section class="stage" id="stageOutput" aria-labelledby="stage04Title">
-      <div class="stage-head">
-        <span class="stage-num" aria-hidden="true">04</span>
-        <h2 id="stage04Title">Defuzzification</h2>
-      </div>
-      <div class="stage-body">
-
-        <div class="fusion-strip-wrap">
-          <div class="fusion-strip" id="fusionStrip">
-            <div class="fusion-marker" id="fusionMarker"></div>
-          </div>
-          <div class="fusion-ticks" id="fusionTicks"></div>
-        </div>
-
-        <div class="score-block">
-          <span class="score-value" id="scoreValue">0.0</span>
-          <span class="score-unit">/ 100 · Signal Score</span>
-        </div>
-
-        <div class="recommendation" id="recommendation">
-          <span class="rec-badge" id="recBadge">HOLD</span>
-          <p class="rec-text" id="recText">Ajustez le RSI et le Sentiment pour générer une recommandation.</p>
-        </div>
-
-        <div class="chart-block">
-          <h3>Ensemble flou de sortie agrégé</h3>
-          <svg id="outputChart" viewBox="0 0 360 150" class="mf-chart" role="img" aria-label="Ensemble flou de sortie agrégé et centroïde"></svg>
-        </div>
-
-      </div>
-    </section>
+    <footer class="foot">
+      <p>Mamdani inference with MIN for AND, MAX for aggregation and centroid defuzzification sampled every 0.5 points. Educational model, not investment advice.</p>
+    </footer>
 
   </main>
-
-  <footer class="app-footer">
-    <p>Inférence de Mamdani · Défuzzification par Centre de Gravité (Centroïde) · Moteur 100% Vanilla JavaScript</p>
-  </footer>
-
-</div>
-
-<script src="script.js"></script>
+  <script src="script.js" defer></script>
 </body>
 </html>

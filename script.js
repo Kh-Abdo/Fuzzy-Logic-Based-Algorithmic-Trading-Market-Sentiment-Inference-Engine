@@ -1,705 +1,642 @@
 'use strict';
 
-/* =============================================================================
-   FUZZY LOGIC TRADING ENGINE
-   -----------------------------------------------------------------------------
-   Système d'inférence floue de type Mamdani combinant :
-     - Entrée 1 : RSI (Relative Strength Index)      domaine [0, 100]
-     - Entrée 2 : Market Sentiment Index               domaine [-100, +100]
-   pour produire :
-     - Sortie   : Trading Signal & Exposition          domaine [-100, +100]
+/* ==========================================================================
+   1. FUZZY ENGINE
+   Pure functions, no DOM access. Mamdani inference:
+   AND = MIN, aggregation = MAX, centroid defuzzification at 0.5 resolution.
+   Version 2 parameters: input sets form strict partitions (degrees sum to 1),
+   RSI sets cross at the textbook 30 / 70, and the strong output sets reach about
+   +/-80. Rule base, plain-sum centroid and classification are unchanged from the
+   original audited script.js.
+   ========================================================================== */
+const Engine = (() => {
+  const SIGNAL_MIN = -100;
+  const SIGNAL_MAX = 100;
+  const STEP = 0.5;
 
-   Pipeline : Fuzzification -> Évaluation des règles (MIN) -> Agrégation (MAX)
-              -> Défuzzification (Centre de Gravité / Centroïde)
-   ============================================================================= */
+  // Membership functions as trapezoids [a, b, c, d]. A triangle repeats its peak: [a, b, b, c].
+  const RSI_SETS = [
+    { id: 'oversold',   label: 'Oversold',   pts: [0, 0, 10, 50] },
+    { id: 'neutral',    label: 'Neutral',    pts: [10, 50, 50, 90] },
+    { id: 'overbought', label: 'Overbought', pts: [50, 90, 100, 100] }
+  ];
 
-/* -----------------------------------------------------------------------------
-   0. UTILITAIRES
-   ----------------------------------------------------------------------------- */
+  const SENTIMENT_SETS = [
+    { id: 'bearish', label: 'Bearish', pts: [-100, -100, -50, -10] },
+    { id: 'neutral', label: 'Neutral', pts: [-50, -10, 10, 50] },
+    { id: 'bullish', label: 'Bullish', pts: [10, 50, 100, 100] }
+  ];
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
+  const OUTPUT_SETS = [
+    { id: 'strongSell', label: 'Strong Sell', pts: [-100, -100, -80, -45], color: '#ff3b6b' },
+    { id: 'sell',       label: 'Sell',        pts: [-55, -30, -30, -5],   color: '#ff9a3d' },
+    { id: 'hold',       label: 'Hold',        pts: [-20, 0, 0, 20],        color: '#ffd93d' },
+    { id: 'buy',        label: 'Buy',         pts: [5, 30, 30, 55],        color: '#9be564' },
+    { id: 'strongBuy',  label: 'Strong Buy',  pts: [45, 80, 100, 100],     color: '#1ff2a5' }
+  ];
 
-function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
+  // Complete 3x3 rule base. Rows follow RSI_SETS, columns follow SENTIMENT_SETS.
+  const RULES = [
+    ['hold',       'buy',  'strongBuy'],   // RSI oversold
+    ['sell',       'hold', 'buy'],         // RSI neutral
+    ['strongSell', 'sell', 'hold']         // RSI overbought
+  ];
 
-function hexToRgb(hex) {
-  const clean = hex.replace('#', '');
-  const full = clean.length === 3 ? clean.split('').map((c) => c + c).join('') : clean;
-  const intVal = parseInt(full, 16);
-  return { r: (intVal >> 16) & 255, g: (intVal >> 8) & 255, b: intVal & 255 };
-}
-
-function hexToRgba(hex, alpha) {
-  const { r, g, b } = hexToRgb(hex);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
-function relativeLuminance(hex) {
-  const { r, g, b } = hexToRgb(hex);
-  const channels = [r, g, b].map((v) => {
-    const c = v / 255;
-    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-  });
-  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
-}
-
-function bestTextColor(bgHex) {
-  return relativeLuminance(bgHex) > 0.45 ? '#0a0e14' : '#f3f5f9';
-}
-
-/* -----------------------------------------------------------------------------
-   1. FONCTIONS D'APPARTENANCE (Membership Functions)
-   ----------------------------------------------------------------------------- */
-
-/**
- * Fonction d'appartenance trapézoïdale.
- * a, d : pieds du trapèze (appartenance = 0)
- * b, c : épaules du trapèze (appartenance = 1 sur [b, c])
- * Le cas a === b (respectivement c === d) supprime la rampe correspondante,
- * ce qui permet de modéliser un plateau qui commence/finit au bord du domaine.
- */
-function trapMF(x, a, b, c, d) {
-  if (x < a || x > d) return 0;
-  if (x >= b && x <= c) return 1;
-  if (x < b) return b === a ? 1 : (x - a) / (b - a);
-  return d === c ? 1 : (d - x) / (d - c);
-}
-
-/**
- * Fonction d'appartenance triangulaire — cas particulier du trapèze où
- * l'épaule haute est réduite à un point unique (b === c).
- */
-function triMF(x, a, b, c) {
-  return trapMF(x, a, b, b, c);
-}
-
-function evalSet(setDef, x) {
-  return setDef.type === 'trap'
-    ? trapMF(x, setDef.params[0], setDef.params[1], setDef.params[2], setDef.params[3])
-    : triMF(x, setDef.params[0], setDef.params[1], setDef.params[2]);
-}
-
-/* -----------------------------------------------------------------------------
-   2. VARIABLES LINGUISTIQUES
-   ----------------------------------------------------------------------------- */
-
-const RSI_SETS = {
-  oversold: { type: 'trap', params: [0, 0, 25, 40], label: 'Survendu' },
-  neutral: { type: 'tri', params: [25, 50, 75], label: 'Neutre' },
-  overbought: { type: 'trap', params: [60, 75, 100, 100], label: 'Suracheté' },
-};
-
-const SENT_SETS = {
-  bearish: { type: 'trap', params: [-100, -100, -50, -20], label: 'Baissier' },
-  neutral: { type: 'tri', params: [-50, 0, 50], label: 'Neutre' },
-  bullish: { type: 'trap', params: [20, 50, 100, 100], label: 'Haussier' },
-};
-
-const OUTPUT_SETS = {
-  strongSell: { type: 'trap', params: [-100, -100, -80, -50], label: 'Vente Forte', short: 'S.SELL' },
-  sell: { type: 'tri', params: [-70, -40, -10], label: 'Vente', short: 'SELL' },
-  hold: { type: 'tri', params: [-20, 0, 20], label: 'Conserver', short: 'HOLD' },
-  buy: { type: 'tri', params: [10, 40, 70], label: 'Achat', short: 'BUY' },
-  strongBuy: { type: 'trap', params: [50, 80, 100, 100], label: 'Achat Fort', short: 'S.BUY' },
-};
-
-/* Attribution des couleurs : palette "technique" (bleu/violet) pour le RSI,
-   palette "signal" (rouge/ambre/vert) pour le Sentiment et pour la Sortie —
-   la sortie et le sentiment partagent un langage visuel car les deux sont,
-   par nature, des grandeurs directionnelles (baissier <-> haussier). */
-const RSI_COLOR_KEY = { oversold: 'cyan', neutral: 'indigo', overbought: 'violet' };
-const SENT_COLOR_KEY = { bearish: 'red', neutral: 'amber', bullish: 'green' };
-const OUTPUT_COLOR_KEY = { strongSell: 'redStrong', sell: 'red', hold: 'amber', buy: 'green', strongBuy: 'greenStrong' };
-
-let COLORS = {};
-function colorFor(colorKeyMap, key) {
-  return COLORS[colorKeyMap[key]];
-}
-
-/* -----------------------------------------------------------------------------
-   3. BASE DE RÈGLES FLOUES (matrice complète 3x3 = 9 règles)
-   -----------------------------------------------------------------------------
-   Logique retenue : le RSI porte un biais directionnel implicite (Survendu ->
-   tendance haussière potentielle de retournement ; Suracheté -> tendance
-   baissière potentielle de retournement). Le Sentiment confirme, contredit ou
-   reste neutre vis-à-vis de ce biais :
-     - Biais confirmé (même direction)      -> signal amplifié
-     - Sentiment neutre                      -> signal modéré
-     - Signaux contradictoires               -> Conserver (Hold), prudence
-   ----------------------------------------------------------------------------- */
-
-const RULE_BASE = [
-  { rsi: 'oversold', sent: 'bearish', out: 'hold' },
-  { rsi: 'oversold', sent: 'neutral', out: 'buy' },
-  { rsi: 'oversold', sent: 'bullish', out: 'strongBuy' },
-
-  { rsi: 'neutral', sent: 'bearish', out: 'sell' },
-  { rsi: 'neutral', sent: 'neutral', out: 'hold' },
-  { rsi: 'neutral', sent: 'bullish', out: 'buy' },
-
-  { rsi: 'overbought', sent: 'bearish', out: 'strongSell' },
-  { rsi: 'overbought', sent: 'neutral', out: 'sell' },
-  { rsi: 'overbought', sent: 'bullish', out: 'hold' },
-];
-
-/* -----------------------------------------------------------------------------
-   4. MOTEUR D'INFÉRENCE
-   ----------------------------------------------------------------------------- */
-
-function fuzzify(sets, x) {
-  const degrees = {};
-  for (const key in sets) degrees[key] = evalSet(sets[key], x);
-  return degrees;
-}
-
-/** Évaluation des règles : opérateur AND = MIN des degrés d'appartenance. */
-function evaluateRules(rsiDeg, sentDeg) {
-  return RULE_BASE.map((rule) => ({
-    ...rule,
-    strength: Math.min(rsiDeg[rule.rsi], sentDeg[rule.sent]),
+  // Execution zones, read on the raw score: <= -41, <= -11, <= +10, <= +40, above.
+  const ZONES = [
+    { id: 'strongSell', action: 'Strong Sell / Short',  range: '\u2212100 to \u221241', max: -41, stance: 'Open or hold a short position' },
+    { id: 'sell',       action: 'Sell / Take Profit',   range: '\u221240 to \u221211',  max: -11, stance: 'Cut long exposure and take profit' },
+    { id: 'hold',       action: 'Hold / No Trade',      range: '\u221210 to +10',       max: 10,  stance: 'Stay out of the market' },
+    { id: 'buy',        action: 'Accumulate / Buy',     range: '+11 to +40',            max: 40,  stance: 'Build a long position gradually' },
+    { id: 'strongBuy',  action: 'Strong Buy / Long',    range: '+41 to +100',           max: 100, stance: 'Hold a full long position' }
+  ].map((z) => Object.assign({}, z, {
+    label: OUTPUT_SETS.find((s) => s.id === z.id).label,
+    color: OUTPUT_SETS.find((s) => s.id === z.id).color
   }));
-}
 
-/** Agrégation intra-ensemble : plusieurs règles peuvent pointer vers le même
- *  ensemble de sortie ; on retient la force de déclenchement maximale (MAX). */
-function aggregateOutputStrengths(ruleResults) {
-  const strengths = {};
-  for (const key in OUTPUT_SETS) strengths[key] = 0;
-  ruleResults.forEach((r) => {
-    if (r.strength > strengths[r.out]) strengths[r.out] = r.strength;
-  });
-  return strengths;
-}
-
-/** Échantillonne la courbe de sortie agrégée : pour chaque point y du domaine,
- *  on écrête (MIN) chaque ensemble de sortie par sa force de déclenchement,
- *  puis on prend l'enveloppe supérieure (MAX) des 5 ensembles écrêtés. */
-function sampleAggregatedCurve(outputStrengths, step) {
-  const points = [];
-  for (let y = -100; y <= 100 + 1e-9; y += step) {
-    const yr = Math.min(100, Math.round(y * 100) / 100);
-    let agg = 0;
-    for (const key in OUTPUT_SETS) {
-      const clipped = Math.min(outputStrengths[key], evalSet(OUTPUT_SETS[key], yr));
-      if (clipped > agg) agg = clipped;
-    }
-    points.push({ x: yr, y: agg });
-  }
-  return points;
-}
-
-/** Défuzzification par Centre de Gravité (Centroïde), intégration numérique
- *  par sommation discrète sur le domaine échantillonné. */
-function defuzzifyCentroid(curvePoints) {
-  let numerator = 0;
-  let denominator = 0;
-  for (const p of curvePoints) {
-    numerator += p.x * p.y;
-    denominator += p.y;
-  }
-  return denominator === 0 ? 0 : numerator / denominator;
-}
-
-/** Classification du score net selon la table d'interprétation du cahier des
- *  charges (section 4.2). */
-function classifySignal(score) {
-  if (score <= -41) {
-    return {
-      key: 'strongSell',
-      title: 'Vente Forte',
-      sub: 'Strong Sell / Short',
-      text: 'Convergence baissière marquée entre le momentum RSI et le sentiment de marché. Une position courte ou une réduction forte de l’exposition est justifiée.',
-    };
-  }
-  if (score <= -11) {
-    return {
-      key: 'sell',
-      title: 'Vente Modérée',
-      sub: 'Sell / Take Profit',
-      text: 'La pondération technique et le sentiment penchent vers la baisse. Une prise de profit partielle ou un allègement de position est recommandé.',
-    };
-  }
-  if (score <= 10) {
-    return {
-      key: 'hold',
-      title: 'Neutre / Conserver',
-      sub: 'Hold / No Trade',
-      text: 'Aucun consensus fort ne se dégage entre le RSI et le sentiment de marché. Le système recommande de rester en observation.',
-    };
-  }
-  if (score <= 40) {
-    return {
-      key: 'buy',
-      title: 'Achat Modéré',
-      sub: 'Accumulate / Buy',
-      text: 'Le momentum et le sentiment convergent modérément à la hausse. Une accumulation progressive est envisageable.',
-    };
-  }
-  return {
-    key: 'strongBuy',
-    title: 'Achat Fort',
-    sub: 'Strong Buy / Long',
-    text: 'Convergence haussière marquée entre le RSI et le sentiment de marché. Signal d’entrée fort en position longue.',
-  };
-}
-
-/* -----------------------------------------------------------------------------
-   5. RENDU — GRAPHIQUES DES FONCTIONS D'APPARTENANCE (SVG)
-   ----------------------------------------------------------------------------- */
-
-function buildMFChartSVG(setsObj, colorKeyMap, domainMin, domainMax, currentX) {
-  const W = 360;
-  const H = 130;
-  const padL = 27;
-  const padR = 8;
-  const padT = 12;
-  const padB = 20;
-  const plotW = W - padL - padR;
-  const plotH = H - padT - padB;
-
-  const xToPx = (x) => padL + ((x - domainMin) / (domainMax - domainMin)) * plotW;
-  const yToPx = (y) => padT + (1 - y) * plotH;
-
-  let svg = '';
-
-  svg += `<line x1="${padL}" y1="${yToPx(0)}" x2="${W - padR}" y2="${yToPx(0)}" stroke="${COLORS.line}" stroke-width="1"/>`;
-  svg += `<line x1="${padL}" y1="${yToPx(1)}" x2="${W - padR}" y2="${yToPx(1)}" stroke="${COLORS.lineSoft}" stroke-width="1" stroke-dasharray="2 3"/>`;
-  svg += `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${H - padB}" stroke="${COLORS.line}" stroke-width="1"/>`;
-
-  svg += `<text x="${padL - 6}" y="${yToPx(1) + 3}" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="8" fill="${COLORS.mistDim}">1</text>`;
-  svg += `<text x="${padL - 6}" y="${yToPx(0) + 3}" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="8" fill="${COLORS.mistDim}">0</text>`;
-
-  const mid = (domainMin + domainMax) / 2;
-  svg += `<text x="${xToPx(domainMin)}" y="${H - 6}" text-anchor="start" font-family="IBM Plex Mono, monospace" font-size="8" fill="${COLORS.mistDim}">${domainMin}</text>`;
-  svg += `<text x="${xToPx(mid)}" y="${H - 6}" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="8" fill="${COLORS.mistDim}">${mid}</text>`;
-  svg += `<text x="${xToPx(domainMax)}" y="${H - 6}" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="8" fill="${COLORS.mistDim}">${domainMax}</text>`;
-
-  for (const key in setsObj) {
-    const def = setsObj[key];
-    const color = colorFor(colorKeyMap, key);
-    let pts = '';
-    for (let x = domainMin; x <= domainMax; x += 1) {
-      pts += `${xToPx(x)},${yToPx(evalSet(def, x))} `;
-    }
-    svg += `<polyline points="${pts.trim()}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  function mu(x, p) {
+    const a = p[0], b = p[1], c = p[2], d = p[3];
+    if (x < a || x > d) return 0;
+    if (x >= b && x <= c) return 1;
+    if (x < b) return (x - a) / (b - a);
+    return (d - x) / (d - c);
   }
 
-  if (currentX !== undefined && currentX !== null) {
-    const mx = xToPx(clamp(currentX, domainMin, domainMax));
-    svg += `<line x1="${mx}" y1="${padT}" x2="${mx}" y2="${H - padB}" stroke="${COLORS.ink}" stroke-width="1" stroke-dasharray="3 3" opacity="0.55"/>`;
-    for (const key in setsObj) {
-      const def = setsObj[key];
-      const color = colorFor(colorKeyMap, key);
-      const my = yToPx(evalSet(def, currentX));
-      svg += `<circle cx="${mx}" cy="${my}" r="3.2" fill="${color}" stroke="${COLORS.bg}" stroke-width="1.2"/>`;
-    }
+  function fuzzify(x, sets) {
+    return sets.map((s) => ({ id: s.id, label: s.label, degree: mu(x, s.pts) }));
   }
 
-  return svg;
-}
-
-function buildOutputChartSVG(aggregatedCurve, score, categoryColor) {
-  const W = 360;
-  const H = 150;
-  const padL = 27;
-  const padR = 8;
-  const padT = 20;
-  const padB = 22;
-  const plotW = W - padL - padR;
-  const plotH = H - padT - padB;
-  const domainMin = -100;
-  const domainMax = 100;
-
-  const xToPx = (x) => padL + ((x - domainMin) / (domainMax - domainMin)) * plotW;
-  const yToPx = (y) => padT + (1 - y) * plotH;
-
-  let svg = '';
-
-  svg += `<line x1="${padL}" y1="${yToPx(0)}" x2="${W - padR}" y2="${yToPx(0)}" stroke="${COLORS.line}" stroke-width="1"/>`;
-  svg += `<line x1="${padL}" y1="${yToPx(1)}" x2="${W - padR}" y2="${yToPx(1)}" stroke="${COLORS.lineSoft}" stroke-width="1" stroke-dasharray="2 3"/>`;
-  svg += `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${H - padB}" stroke="${COLORS.line}" stroke-width="1"/>`;
-
-  svg += `<text x="${padL - 6}" y="${yToPx(1) + 3}" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="8" fill="${COLORS.mistDim}">1</text>`;
-  svg += `<text x="${padL - 6}" y="${yToPx(0) + 3}" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="8" fill="${COLORS.mistDim}">0</text>`;
-  svg += `<text x="${xToPx(domainMin)}" y="${H - 6}" text-anchor="start" font-family="IBM Plex Mono, monospace" font-size="8" fill="${COLORS.mistDim}">-100</text>`;
-  svg += `<text x="${xToPx(0)}" y="${H - 6}" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="8" fill="${COLORS.mistDim}">0</text>`;
-  svg += `<text x="${xToPx(domainMax)}" y="${H - 6}" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="8" fill="${COLORS.mistDim}">+100</text>`;
-
-  // Ensembles de sortie de référence (traits fins, atténués)
-  for (const key in OUTPUT_SETS) {
-    const def = OUTPUT_SETS[key];
-    const color = colorFor(OUTPUT_COLOR_KEY, key);
-    let pts = '';
-    for (let x = domainMin; x <= domainMax; x += 1) {
-      pts += `${xToPx(x)},${yToPx(evalSet(def, x))} `;
-    }
-    svg += `<polyline points="${pts.trim()}" fill="none" stroke="${color}" stroke-width="1.2" opacity="0.32"/>`;
+  function classify(score) {
+    if (score <= -41) return ZONES[0];
+    if (score <= -11) return ZONES[1];
+    if (score <= 10) return ZONES[2];
+    if (score <= 40) return ZONES[3];
+    return ZONES[4];
   }
 
-  // Forme agrégée (résultat de l'écrêtage MIN + enveloppe MAX)
-  const baseline = yToPx(0);
-  let path = `M ${xToPx(aggregatedCurve[0].x)},${baseline} `;
-  aggregatedCurve.forEach((p) => {
-    path += `L ${xToPx(p.x)},${yToPx(p.y)} `;
-  });
-  path += `L ${xToPx(aggregatedCurve[aggregatedCurve.length - 1].x)},${baseline} Z`;
-  svg += `<path d="${path}" fill="${hexToRgba(categoryColor, 0.28)}" stroke="${categoryColor}" stroke-width="1.8" stroke-linejoin="round"/>`;
+  function infer(rsi, sentiment) {
+    const rsiDeg = fuzzify(rsi, RSI_SETS);
+    const sentDeg = fuzzify(sentiment, SENTIMENT_SETS);
 
-  // Ligne du centroïde (score net défuzzifié)
-  const cx = xToPx(clamp(score, domainMin, domainMax));
-  svg += `<line x1="${cx}" y1="${padT - 8}" x2="${cx}" y2="${H - padB}" stroke="${COLORS.ink}" stroke-width="1.4" stroke-dasharray="4 3"/>`;
-  svg += `<circle cx="${cx}" cy="${padT - 8}" r="3" fill="${COLORS.ink}"/>`;
-  svg += `<text x="${clamp(cx, 30, W - 30)}" y="${padT - 11}" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9" font-weight="600" fill="${COLORS.ink}">${score.toFixed(1)}</text>`;
-
-  return svg;
-}
-
-/* -----------------------------------------------------------------------------
-   6. RENDU — LISTES DE DEGRÉS D'APPARTENANCE
-   ----------------------------------------------------------------------------- */
-
-function updateDegreeList(containerId, sets, degrees, colorKeyMap) {
-  const container = document.getElementById(containerId);
-  container.innerHTML = Object.keys(sets)
-    .map((key) => {
-      const color = colorFor(colorKeyMap, key);
-      const val = degrees[key];
-      const pct = clamp(val * 100, 0, 100).toFixed(0);
-      return `<div class="degree-row">
-        <span class="degree-swatch" style="background:${color}"></span>
-        <span class="degree-name">${sets[key].label}</span>
-        <span class="degree-value">${val.toFixed(2)}</span>
-        <div class="degree-bar-track"><div class="degree-bar-fill" style="width:${pct}%; background:${color}"></div></div>
-      </div>`;
-    })
-    .join('');
-}
-
-/* -----------------------------------------------------------------------------
-   7. RENDU — MATRICE DE RÈGLES (3x3)
-   ----------------------------------------------------------------------------- */
-
-function buildRuleMatrixSkeleton() {
-  const container = document.getElementById('ruleMatrixContainer');
-  const rsiKeys = Object.keys(RSI_SETS);
-  const sentKeys = Object.keys(SENT_SETS);
-
-  let html = '<table class="rule-table"><thead><tr><th class="corner"></th>';
-  sentKeys.forEach((sk) => {
-    html += `<th>${SENT_SETS[sk].label}</th>`;
-  });
-  html += '</tr></thead><tbody>';
-
-  rsiKeys.forEach((rk) => {
-    html += `<tr><th>${RSI_SETS[rk].label}</th>`;
-    sentKeys.forEach((sk) => {
-      const rule = RULE_BASE.find((r) => r.rsi === rk && r.sent === sk);
-      html += `<td class="rule-cell" id="cell-${rk}-${sk}">
-        <span class="cell-out">${OUTPUT_SETS[rule.out].short}</span>
-        <span class="cell-strength" id="strength-${rk}-${sk}">0.00</span>
-      </td>`;
+    // Rule evaluation (AND = MIN) and per-output strength (rules sharing a consequent merge with MAX)
+    const alpha = {};
+    OUTPUT_SETS.forEach((s) => { alpha[s.id] = 0; });
+    const firing = [];
+    RULES.forEach((row, i) => {
+      row.forEach((outId, j) => {
+        const strength = Math.min(rsiDeg[i].degree, sentDeg[j].degree);
+        firing.push({ rsiIndex: i, sentIndex: j, output: outId, strength: strength });
+        alpha[outId] = Math.max(alpha[outId], strength);
+      });
     });
-    html += '</tr>';
-  });
 
-  html += '</tbody></table>';
-  container.innerHTML = html;
-}
-
-function updateRuleMatrix(ruleResults) {
-  ruleResults.forEach((r) => {
-    const cell = document.getElementById(`cell-${r.rsi}-${r.sent}`);
-    const strengthEl = document.getElementById(`strength-${r.rsi}-${r.sent}`);
-    const color = colorFor(OUTPUT_COLOR_KEY, r.out);
-    const alpha = 0.1 + r.strength * 0.55;
-
-    cell.style.backgroundColor = hexToRgba(color, alpha);
-    cell.style.color = r.strength > 0.3 ? bestTextColor(color) : COLORS.mist;
-    strengthEl.textContent = r.strength.toFixed(2);
-
-    if (r.strength > 0.01) {
-      cell.classList.add('active');
-      cell.style.boxShadow = `inset 0 0 0 1px ${hexToRgba(color, 0.75)}`;
-    } else {
-      cell.classList.remove('active');
-      cell.style.boxShadow = 'none';
+    // Aggregation (MAX of truncated output sets) and centroid
+    const n = Math.round((SIGNAL_MAX - SIGNAL_MIN) / STEP) + 1;
+    const xs = new Array(n);
+    const agg = new Array(n);
+    let numerator = 0;
+    let denominator = 0;
+    for (let k = 0; k < n; k++) {
+      const x = SIGNAL_MIN + k * STEP;
+      let m = 0;
+      for (let s = 0; s < OUTPUT_SETS.length; s++) {
+        const set = OUTPUT_SETS[s];
+        m = Math.max(m, Math.min(alpha[set.id], mu(x, set.pts)));
+      }
+      xs[k] = x;
+      agg[k] = m;
+      numerator += x * m;
+      denominator += m;
     }
-  });
-}
 
-function updateActiveRulesList(ruleResults) {
-  const container = document.getElementById('activeRulesList');
-  const active = ruleResults.filter((r) => r.strength > 0.005).sort((a, b) => b.strength - a.strength);
+    const raw = denominator > 0 ? numerator / denominator : 0;
+    const score = Math.round(raw * 1e6) / 1e6 + 0; // removes float noise and negative zero
 
-  if (active.length === 0) {
-    container.innerHTML = '<div class="active-rules-empty">Aucune règle active pour ces valeurs.</div>';
-    return;
+    return {
+      rsi: rsi,
+      sentiment: sentiment,
+      rsiDeg: rsiDeg,
+      sentDeg: sentDeg,
+      firing: firing,
+      alpha: alpha,
+      curve: { xs: xs, mu: agg },
+      numerator: numerator,
+      denominator: denominator,
+      score: score,
+      zone: classify(score)
+    };
   }
 
-  container.innerHTML = active
-    .map((r) => {
-      const color = colorFor(OUTPUT_COLOR_KEY, r.out);
-      return `<div class="active-rule-row" style="border-left-color:${color}">
-        <span class="rule-text">SI RSI=<strong>${RSI_SETS[r.rsi].label}</strong> ET Sentiment=<strong>${SENT_SETS[r.sent].label}</strong> → <strong>${OUTPUT_SETS[r.out].label}</strong></span>
-        <span class="rule-strength">${r.strength.toFixed(2)}</span>
-      </div>`;
-    })
-    .join('');
-}
+  return {
+    SIGNAL_MIN: SIGNAL_MIN,
+    SIGNAL_MAX: SIGNAL_MAX,
+    STEP: STEP,
+    RSI_SETS: RSI_SETS,
+    SENTIMENT_SETS: SENTIMENT_SETS,
+    OUTPUT_SETS: OUTPUT_SETS,
+    RULES: RULES,
+    ZONES: ZONES,
+    mu: mu,
+    fuzzify: fuzzify,
+    classify: classify,
+    infer: infer
+  };
+})();
 
-/* -----------------------------------------------------------------------------
-   8. RENDU — JAUGE HORIZONTALE (FUSION STRIP) & RECOMMANDATION
-   ----------------------------------------------------------------------------- */
 
-const FUSION_BOUNDARIES = [-100, -40, -10, 10, 40, 100];
+/* ==========================================================================
+   2. USER INTERFACE
+   Dials and gauge update live. The engine runs only on an explicit action:
+   the "Analyser & Exécuter" button or an example scenario.
+   ========================================================================== */
+function initUI() {
+  const E = Engine;
+  const $ = (id) => document.getElementById(id);
+  const reduceMotion = typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-function buildFusionAxis() {
-  const strip = document.getElementById('fusionStrip');
-  const ticksContainer = document.getElementById('fusionTicks');
+  const STEP_MS = 700;
+  const SET_COLORS = ['#4dd6ff', '#b69cff', '#ff7ac8'];
+  const STAGE_NAMES = ['Fuzzification', 'Rule evaluation', 'Aggregation', 'Defuzzification', 'Execution signal'];
+  const MINUS = '\u2212';
 
-  let lineHtml = '';
-  let labelHtml = '';
+  const els = {
+    cockpit: $('cockpit'),
+    run: $('runBtn'),
+    status: $('statusLine'),
+    sr: $('srStatus'),
+    rsi: $('rsiInput'),
+    sent: $('sentInput'),
+    led: $('ledScore'),
+    ledZone: $('ledZone'),
+    gauge: $('gaugeSvg'),
+    needle: $('gNeedle'),
+    stages: Array.prototype.slice.call(document.querySelectorAll('.stage')),
+    steps: Array.prototype.slice.call(document.querySelectorAll('#stepper li')),
+    bodies: [0, 1, 2, 3, 4].map((i) => $('stage' + i))
+  };
 
-  FUSION_BOUNDARIES.forEach((b) => {
-    const pct = ((b - -100) / 200) * 100;
-    if (b !== -100 && b !== 100) {
-      lineHtml += `<div class="tick-line" style="left:${pct}%"></div>`;
+  let timers = [];
+  let ledFrame = 0;
+  let lastRun = null;
+
+  /* ---------- formatting ---------- */
+  function fixed(v, d) {
+    const n = Number(v.toFixed(d));
+    return (n === 0 ? 0 : n).toFixed(d);
+  }
+  function signed(v, d) {
+    const n = Number(v.toFixed(d));
+    if (n === 0) return (0).toFixed(d);
+    return (n < 0 ? MINUS : '+') + Math.abs(n).toFixed(d);
+  }
+  function grouped(v) {
+    const s = Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return (Math.round(v * 100) < 0 ? MINUS : '') + s;
+  }
+  function axisNum(v, withPlus) {
+    if (v === 0) return '0';
+    if (v < 0) return MINUS + Math.abs(v);
+    return (withPlus ? '+' : '') + v;
+  }
+
+  /* ---------- svg geometry ---------- */
+  function polar(cx, cy, r, deg) {
+    const a = deg * Math.PI / 180;
+    return [cx + r * Math.sin(a), cy - r * Math.cos(a)];
+  }
+  function arcPath(cx, cy, r, a0, a1) {
+    const p0 = polar(cx, cy, r, a0);
+    const p1 = polar(cx, cy, r, a1);
+    const large = Math.abs(a1 - a0) > 180 ? 1 : 0;
+    return 'M' + p0[0].toFixed(2) + ' ' + p0[1].toFixed(2) +
+      'A' + r + ' ' + r + ' 0 ' + large + ' 1 ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2);
+  }
+  // Outline of a trapezoid as [x, membership] points. Shoulders at the domain edge start at full membership.
+  function outline(p) {
+    const pts = [];
+    if (p[0] === p[1]) pts.push([p[1], 1]); else { pts.push([p[0], 0]); pts.push([p[1], 1]); }
+    if (p[2] !== p[1]) pts.push([p[2], 1]);
+    if (p[3] === p[2]) { /* closed by the shoulder */ } else pts.push([p[3], 0]);
+    return pts;
+  }
+
+  /* ---------- input dials ---------- */
+  const DIALS = [
+    { id: 'rsi',  svg: $('rsiSvg'),  input: els.rsi,  min: 0,    max: 100, minor: 5,  major: 25, unit: 'RSI',
+      fmt: (v) => String(v), edge: ['0', '100'] },
+    { id: 'sent', svg: $('sentSvg'), input: els.sent, min: -100, max: 100, minor: 10, major: 50, unit: 'sentiment',
+      fmt: (v) => signed(v, 0), edge: [MINUS + '100', '+100'] }
+  ];
+  const A0 = -135;
+  const A1 = 135;
+
+  function dialAngle(d, v) {
+    return A0 + (v - d.min) / (d.max - d.min) * (A1 - A0);
+  }
+
+  function buildDial(d) {
+    let h = '<defs><linearGradient id="dg-' + d.id + '" x1="0" y1="0" x2="1" y2="1">' +
+      '<stop offset="0" stop-color="#4dd6ff"/><stop offset="1" stop-color="#ff7ac8"/></linearGradient></defs>';
+    h += '<path class="dial-track" d="' + arcPath(100, 100, 80, A0, A1) + '"/>';
+    h += '<path class="dial-progress" id="' + d.id + 'Progress" pathLength="100" stroke="url(#dg-' + d.id + ')" d="' +
+      arcPath(100, 100, 80, A0, A1) + '"/>';
+    for (let v = d.min; v <= d.max; v += d.minor) {
+      const major = (v - d.min) % d.major === 0;
+      const a = dialAngle(d, v);
+      const p0 = polar(100, 100, 70, a);
+      const p1 = polar(100, 100, major ? 57 : 63, a);
+      h += '<line class="dial-tick' + (major ? ' is-major' : '') + '" x1="' + p0[0].toFixed(2) + '" y1="' + p0[1].toFixed(2) +
+        '" x2="' + p1[0].toFixed(2) + '" y2="' + p1[1].toFixed(2) + '"/>';
     }
-    labelHtml += `<span class="tick-label" style="left:${pct}%">${b > 0 ? `+${b}` : b}</span>`;
+    const l0 = polar(100, 100, 94, A0);
+    const l1 = polar(100, 100, 94, A1);
+    h += '<text class="dial-edge" x="' + (l0[0] + 2).toFixed(1) + '" y="' + (l0[1] + 12).toFixed(1) + '" text-anchor="middle">' + d.edge[0] + '</text>';
+    h += '<text class="dial-edge" x="' + (l1[0] - 2).toFixed(1) + '" y="' + (l1[1] + 12).toFixed(1) + '" text-anchor="middle">' + d.edge[1] + '</text>';
+    h += '<g class="dial-needle" id="' + d.id + 'Needle"><path d="M97 106 L100 36 L103 106 Z"/>' +
+      '<circle cx="100" cy="100" r="8"/><circle class="dial-core" cx="100" cy="100" r="3"/></g>';
+    h += '<text class="dial-value" id="' + d.id + 'Value" x="100" y="152" text-anchor="middle"></text>';
+    h += '<text class="dial-unit" x="100" y="170" text-anchor="middle">' + d.unit + '</text>';
+    d.svg.innerHTML = h;
+    d.needle = $(d.id + 'Needle');
+    d.progress = $(d.id + 'Progress');
+    d.value = $(d.id + 'Value');
+  }
+
+  function updateDial(d) {
+    const v = Number(d.input.value);
+    const pct = (v - d.min) / (d.max - d.min) * 100;
+    d.needle.style.transform = 'rotate(' + dialAngle(d, v).toFixed(2) + 'deg)';
+    d.progress.style.strokeDasharray = pct.toFixed(2) + ' 100';
+    d.value.textContent = d.fmt(v);
+  }
+
+  /* ---------- output gauge ---------- */
+  const G = { cx: 200, cy: 200, r: 138 };
+  const BOUNDS = [-100, -41, -11, 10, 40, 100];
+  const gAngle = (v) => v * 0.9;
+
+  function buildGauge() {
+    let zones = '';
+    E.ZONES.forEach((z, i) => {
+      const a0 = gAngle(BOUNDS[i]) + (i === 0 ? 0 : 0.7);
+      const a1 = gAngle(BOUNDS[i + 1]) - (i === E.ZONES.length - 1 ? 0 : 0.7);
+      zones += '<path class="g-zone" data-zone="' + z.id + '" style="--c:' + z.color + '" d="' + arcPath(G.cx, G.cy, G.r, a0, a1) + '"/>';
+    });
+    $('gZones').innerHTML = zones;
+
+    let ticks = '';
+    for (let v = -100; v <= 100; v += 10) {
+      const major = v % 50 === 0;
+      const a = gAngle(v);
+      const p0 = polar(G.cx, G.cy, 124, a);
+      const p1 = polar(G.cx, G.cy, major ? 110 : 117, a);
+      ticks += '<line class="g-tick' + (major ? ' is-major' : '') + '" x1="' + p0[0].toFixed(2) + '" y1="' + p0[1].toFixed(2) +
+        '" x2="' + p1[0].toFixed(2) + '" y2="' + p1[1].toFixed(2) + '"/>';
+    }
+    $('gTicks').innerHTML = ticks;
+
+    let labels = '';
+    [-100, -50, 0, 50, 100].forEach((v) => {
+      const p = polar(G.cx, G.cy, 166, gAngle(v));
+      labels += '<text class="g-label" x="' + p[0].toFixed(1) + '" y="' + (p[1] + 4).toFixed(1) + '" text-anchor="middle">' + axisNum(v, true) + '</text>';
+    });
+    $('gLabels').innerHTML = labels;
+  }
+
+  function animateLed(target) {
+    cancelAnimationFrame(ledFrame);
+    if (reduceMotion) { els.led.textContent = signed(target, 2); return; }
+    const t0 = performance.now();
+    const dur = 1100;
+    const frame = (t) => {
+      const p = Math.min(1, (t - t0) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      els.led.textContent = signed(target * eased, 2);
+      if (p < 1) ledFrame = requestAnimationFrame(frame);
+      else els.led.textContent = signed(target, 2);
+    };
+    ledFrame = requestAnimationFrame(frame);
+  }
+
+  function resetGauge() {
+    cancelAnimationFrame(ledFrame);
+    els.needle.style.transform = 'rotate(-90deg)';
+    Array.prototype.forEach.call(els.gauge.querySelectorAll('.g-zone'), (p) => {
+      p.classList.remove('is-active', 'is-dim');
+    });
+    els.led.textContent = '--.--';
+    els.ledZone.textContent = 'Awaiting analysis';
+    els.cockpit.style.removeProperty('--zone');
+    els.gauge.setAttribute('aria-label', 'Trading signal gauge, no result yet');
+  }
+
+  function setGauge(r) {
+    els.needle.style.transform = 'rotate(' + (r.score * 0.9).toFixed(2) + 'deg)';
+    Array.prototype.forEach.call(els.gauge.querySelectorAll('.g-zone'), (p) => {
+      const on = p.getAttribute('data-zone') === r.zone.id;
+      p.classList.toggle('is-active', on);
+      p.classList.toggle('is-dim', !on);
+    });
+    els.cockpit.style.setProperty('--zone', r.zone.color);
+    els.ledZone.textContent = r.zone.action;
+    els.gauge.setAttribute('aria-label', 'Trading signal gauge: ' + signed(r.score, 2) + ', ' + r.zone.action);
+    animateLed(r.score);
+  }
+
+  /* ---------- stage renderers ---------- */
+  function membershipChart(sets, degrees, value, domain, withPlus, caption) {
+    const W = 320, H = 150, L = 10, R = 10, T = 22, B = 26;
+    const X = (v) => L + (v - domain[0]) / (domain[1] - domain[0]) * (W - L - R);
+    const Y = (m) => T + (1 - m) * (H - T - B);
+    let s = '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + caption + '" focusable="false">';
+    s += '<line class="grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(0) + '" y2="' + Y(0) + '"/>';
+    s += '<line class="grid is-dashed" x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(1) + '" y2="' + Y(1) + '"/>';
+    sets.forEach((set, i) => {
+      const pts = outline(set.pts);
+      const line = pts.map((p, k) => (k ? 'L' : 'M') + X(p[0]).toFixed(1) + ' ' + Y(p[1]).toFixed(1)).join('');
+      const area = line + 'L' + X(pts[pts.length - 1][0]).toFixed(1) + ' ' + Y(0) + 'L' + X(pts[0][0]).toFixed(1) + ' ' + Y(0) + 'Z';
+      const deg = degrees[i].degree;
+      s += '<path d="' + area + '" fill="' + SET_COLORS[i] + '" fill-opacity="' + (0.07 + 0.33 * deg).toFixed(2) + '"/>';
+      s += '<path d="' + line + '" fill="none" stroke="' + SET_COLORS[i] + '" stroke-width="2" stroke-linejoin="round" stroke-opacity="' + (deg > 0 ? 1 : 0.5) + '"/>';
+    });
+    const mx = X(value);
+    s += '<line class="marker-line" x1="' + mx.toFixed(1) + '" x2="' + mx.toFixed(1) + '" y1="' + (T - 8) + '" y2="' + Y(0) + '"/>';
+    degrees.forEach((dg, i) => {
+      if (dg.degree > 0) {
+        s += '<circle cx="' + mx.toFixed(1) + '" cy="' + Y(dg.degree).toFixed(1) + '" r="4.5" fill="' + SET_COLORS[i] + '" stroke="#fff" stroke-width="1.5"/>';
+      }
+    });
+    const anchor = mx > W - 46 ? 'end' : (mx < 46 ? 'start' : 'middle');
+    s += '<text class="marker-label" x="' + mx.toFixed(1) + '" y="10" text-anchor="' + anchor + '">' + (withPlus ? signed(value, 0) : value) + '</text>';
+    const mid = (domain[0] + domain[1]) / 2;
+    [domain[0], mid, domain[1]].forEach((v, k) => {
+      s += '<text class="axis" x="' + X(v).toFixed(1) + '" y="' + (H - 8) + '" text-anchor="' + (k === 0 ? 'start' : (k === 2 ? 'end' : 'middle')) + '">' + axisNum(v, withPlus) + '</text>';
+    });
+    s += '</svg>';
+    return s;
+  }
+
+  function degreeList(degrees) {
+    let h = '<ul class="deg-list">';
+    degrees.forEach((dg, i) => {
+      h += '<li style="--c:' + SET_COLORS[i] + ';--w:' + (dg.degree * 100).toFixed(1) + '%">' +
+        '<span class="deg-name"><i></i>' + dg.label + '</span>' +
+        '<span class="deg-track"><b></b></span>' +
+        '<span class="deg-val">' + fixed(dg.degree, 2) + '</span></li>';
+    });
+    return h + '</ul>';
+  }
+
+  function renderFuzzification(r) {
+    return '<div class="fz-grid">' +
+      '<section class="fz-panel"><h4 class="fz-title">RSI <span>' + r.rsi + '</span></h4>' +
+      membershipChart(E.RSI_SETS, r.rsiDeg, r.rsi, [0, 100], false, 'RSI membership functions with the input marked') +
+      degreeList(r.rsiDeg) + '</section>' +
+      '<section class="fz-panel"><h4 class="fz-title">Market sentiment <span>' + signed(r.sentiment, 0) + '</span></h4>' +
+      membershipChart(E.SENTIMENT_SETS, r.sentDeg, r.sentiment, [-100, 100], true, 'Sentiment membership functions with the input marked') +
+      degreeList(r.sentDeg) + '</section></div>';
+  }
+
+  function renderRules(r) {
+    const outSet = (id) => E.OUTPUT_SETS.find((s) => s.id === id);
+    let h = '<div class="matrix" role="table" aria-label="Rule base with firing strengths">';
+    h += '<div class="mx-corner" role="presentation">RSI \u00d7 sentiment</div>';
+    r.sentDeg.forEach((d, j) => {
+      h += '<div class="mx-head" role="columnheader" style="--c:' + SET_COLORS[j] + '"><span>' + d.label + '</span><b>' + fixed(d.degree, 2) + '</b></div>';
+    });
+    let active = 0;
+    r.rsiDeg.forEach((rd, i) => {
+      h += '<div class="mx-head is-row" role="rowheader" style="--c:' + SET_COLORS[i] + '"><span>' + rd.label + '</span><b>' + fixed(rd.degree, 2) + '</b></div>';
+      r.sentDeg.forEach((sd, j) => {
+        const rule = r.firing.find((f) => f.rsiIndex === i && f.sentIndex === j);
+        const out = outSet(rule.output);
+        const on = rule.strength > 0;
+        if (on) active++;
+        h += '<div class="mx-cell' + (on ? ' is-on' : '') + '" role="cell" style="--c:' + out.color + ';--s:' + rule.strength.toFixed(3) +
+          '" title="min(' + fixed(rd.degree, 2) + ', ' + fixed(sd.degree, 2) + ') = ' + fixed(rule.strength, 2) + '">' +
+          '<span class="mx-out">' + out.label + '</span><span class="mx-str">' + fixed(rule.strength, 2) + '</span></div>';
+      });
+    });
+    h += '</div>';
+    h += '<p class="note">' + active + (active === 1 ? ' rule fires' : ' rules fire') + ' out of 9. The number in each cell is min(RSI degree, sentiment degree).</p>';
+    return h;
+  }
+
+  function signalChart(r, mode) {
+    const W = 440, H = 190, L = 34, R = 12, T = 18, B = 30;
+    const X = (v) => L + (v + 100) / 200 * (W - L - R);
+    const Y = (m) => T + (1 - m) * (H - T - B);
+    const base = Y(0);
+    const xs = r.curve.xs;
+    const f = (n) => n.toFixed(1);
+    const label = mode === 'agg' ? 'Output sets cut at their rule strength and merged' : 'Aggregated shape with the centroid marked';
+    let s = '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + label + '" focusable="false">';
+
+    if (mode === 'def') {
+      s += '<defs><linearGradient id="defFill" gradientUnits="userSpaceOnUse" x1="' + X(-100) + '" x2="' + X(100) + '" y1="0" y2="0">';
+      E.OUTPUT_SETS.forEach((set, i) => {
+        s += '<stop offset="' + (i / (E.OUTPUT_SETS.length - 1)) + '" stop-color="' + set.color + '" stop-opacity="0.6"/>';
+      });
+      s += '</linearGradient></defs>';
+    }
+
+    [0, 0.5, 1].forEach((m) => {
+      s += '<line class="grid' + (m === 0 ? '' : ' is-dashed') + '" x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(m) + '" y2="' + Y(m) + '"/>';
+      s += '<text class="axis" x="' + (L - 6) + '" y="' + (Y(m) + 3) + '" text-anchor="end">' + (m === 0 ? '0' : m === 1 ? '1' : '0.5') + '</text>';
+    });
+    [-100, -50, 0, 50, 100].forEach((v) => {
+      s += '<text class="axis" x="' + X(v) + '" y="' + (H - 9) + '" text-anchor="middle">' + axisNum(v, true) + '</text>';
+    });
+
+    if (mode === 'agg') {
+      E.OUTPUT_SETS.forEach((set) => {
+        const pts = outline(set.pts);
+        const d = pts.map((p, k) => (k ? 'L' : 'M') + f(X(p[0])) + ' ' + f(Y(p[1]))).join('');
+        s += '<path d="' + d + '" fill="none" stroke="' + set.color + '" stroke-opacity="0.45" stroke-dasharray="3 4" stroke-width="1.2"/>';
+      });
+      E.OUTPUT_SETS.forEach((set) => {
+        const a = r.alpha[set.id];
+        if (a <= 0) return;
+        let line = '';
+        xs.forEach((x, k) => {
+          const m = Math.min(a, E.mu(x, set.pts));
+          line += (k ? 'L' : 'M') + f(X(x)) + ' ' + f(Y(m));
+        });
+        s += '<path d="' + line + 'L' + f(X(xs[xs.length - 1])) + ' ' + f(base) + 'L' + f(X(xs[0])) + ' ' + f(base) + 'Z" fill="' + set.color + '" fill-opacity="0.34"/>';
+        s += '<path d="' + line + '" fill="none" stroke="' + set.color + '" stroke-width="1.6"/>';
+        const cx = Math.max(L + 18, Math.min(W - R - 18, X((set.pts[1] + set.pts[2]) / 2)));
+        s += '<text class="alpha-label" x="' + f(cx) + '" y="' + f(Y(a) - 6) + '" text-anchor="middle">\u03b1 ' + fixed(a, 2) + '</text>';
+      });
+    }
+
+    let top = '';
+    r.curve.mu.forEach((m, k) => { top += (k ? 'L' : 'M') + f(X(xs[k])) + ' ' + f(Y(m)); });
+    if (mode === 'def') {
+      s += '<path d="' + top + 'L' + f(X(xs[xs.length - 1])) + ' ' + f(base) + 'L' + f(X(xs[0])) + ' ' + f(base) + 'Z" fill="url(#defFill)"/>';
+    }
+    s += '<path d="' + top + '" fill="none" stroke="#eef1ff" stroke-width="' + (mode === 'agg' ? 2 : 1.6) + '" stroke-linejoin="round"/>';
+
+    if (mode === 'def' && r.denominator > 0) {
+      const cx = X(r.score);
+      const anchor = cx > W - 90 ? 'end' : (cx < L + 90 ? 'start' : 'middle');
+      s += '<line class="centroid-line" x1="' + f(cx) + '" x2="' + f(cx) + '" y1="' + (T - 4) + '" y2="' + f(base) + '" style="--c:' + r.zone.color + '"/>';
+      s += '<path d="M' + f(cx - 6) + ' ' + f(base + 8) + 'L' + f(cx + 6) + ' ' + f(base + 8) + 'L' + f(cx) + ' ' + f(base + 1) + 'Z" fill="' + r.zone.color + '"/>';
+      s += '<text class="centroid-label" x="' + f(cx) + '" y="10" text-anchor="' + anchor + '">x* = ' + signed(r.score, 2) + '</text>';
+    }
+    return s + '</svg>';
+  }
+
+  function renderAggregation(r) {
+    let h = signalChart(r, 'agg');
+    h += '<ul class="legend">';
+    E.OUTPUT_SETS.forEach((set) => {
+      const a = r.alpha[set.id];
+      h += '<li class="legend-item' + (a > 0 ? ' is-on' : '') + '" style="--c:' + set.color + '"><i></i>' + set.label + '<b>' + fixed(a, 2) + '</b></li>';
+    });
+    return h + '</ul>';
+  }
+
+  function renderDefuzzification(r) {
+    if (r.denominator <= 0) {
+      return signalChart(r, 'def') + '<p class="note">No rule fired, so the score defaults to 0.</p>';
+    }
+    return signalChart(r, 'def') +
+      '<div class="formula">' +
+      '<p class="formula-eq">x* = \u03a3 x\u00b7\u03bc(x) \u00f7 \u03a3 \u03bc(x)</p>' +
+      '<dl><dt>\u03a3 x\u00b7\u03bc(x)</dt><dd>' + grouped(r.numerator) + '</dd>' +
+      '<dt>\u03a3 \u03bc(x)</dt><dd>' + grouped(r.denominator) + '</dd>' +
+      '<dt>x*</dt><dd class="is-result" style="--c:' + r.zone.color + '">' + signed(r.score, 2) + '</dd></dl>' +
+      '</div><p class="note">Sampled every 0.5 from \u2212100 to +100, 401 points.</p>';
+  }
+
+  function renderSignal(r) {
+    const exposure = Math.round(Math.abs(r.score));
+    let h = '<div class="signal" style="--c:' + r.zone.color + '">' +
+      '<div class="signal-badge"><span class="signal-score">' + signed(r.score, 2) + '</span>' +
+      '<span class="signal-name">' + r.zone.action + '</span></div>' +
+      '<dl class="signal-facts">' +
+      '<dt>Inputs</dt><dd>RSI ' + r.rsi + ', sentiment ' + signed(r.sentiment, 0) + '</dd>' +
+      '<dt>Stance</dt><dd>' + r.zone.stance + '</dd>' +
+      '<dt>Exposure</dt><dd>' + exposure + '% of the maximum position</dd></dl></div>';
+    h += '<table class="zone-table"><caption class="sr-only">Execution zones</caption><tbody>';
+    E.ZONES.forEach((z) => {
+      h += '<tr' + (z.id === r.zone.id ? ' class="is-active"' : '') + ' style="--c:' + z.color + '">' +
+        '<td><i></i></td><th scope="row">' + z.action + '</th><td>' + z.range + '</td></tr>';
+    });
+    return h + '</tbody></table>';
+  }
+
+  /* ---------- pipeline control ---------- */
+  function clearTimers() {
+    timers.forEach(clearTimeout);
+    timers = [];
+  }
+
+  function setStepper(active) {
+    els.steps.forEach((li, i) => {
+      li.classList.toggle('is-done', i < active);
+      li.classList.toggle('is-current', i === active);
+    });
+  }
+
+  function resetStages() {
+    els.stages.forEach((st) => st.classList.remove('is-visible', 'is-current'));
+    setStepper(-1);
+  }
+
+  function renderStages(r) {
+    els.bodies[0].innerHTML = renderFuzzification(r);
+    els.bodies[1].innerHTML = renderRules(r);
+    els.bodies[2].innerHTML = renderAggregation(r);
+    els.bodies[3].innerHTML = renderDefuzzification(r);
+    els.bodies[4].innerHTML = renderSignal(r);
+  }
+
+  function revealStage(i, r) {
+    els.stages.forEach((st, k) => st.classList.toggle('is-current', k === i));
+    els.stages[i].classList.add('is-visible');
+    if (i < 4) {
+      setStepper(i);
+      els.status.textContent = 'Stage ' + (i + 1) + ' of 5: ' + STAGE_NAMES[i] + '.';
+      return;
+    }
+    setStepper(5);
+    setGauge(r);
+    const msg = 'Analysis complete. ' + r.zone.action + ' at ' + signed(r.score, 2) + '.';
+    els.status.textContent = msg;
+    els.sr.textContent = msg;
+    els.run.removeAttribute('aria-busy');
+  }
+
+  function pulseDials() {
+    ['rsiDial', 'sentDial'].forEach((id) => {
+      const el = $(id);
+      el.classList.remove('is-sampled');
+      void el.offsetWidth;
+      el.classList.add('is-sampled');
+    });
+  }
+
+  function runAnalysis() {
+    const rsi = Number(els.rsi.value);
+    const sentiment = Number(els.sent.value);
+    clearTimers();
+    resetStages();
+    resetGauge();
+    const result = E.infer(rsi, sentiment);
+    lastRun = { rsi: rsi, sentiment: sentiment };
+    els.cockpit.classList.remove('is-stale');
+    els.run.setAttribute('aria-busy', 'true');
+    els.sr.textContent = 'Analysis started.';
+    pulseDials();
+    renderStages(result);
+    if (reduceMotion) {
+      [0, 1, 2, 3, 4].forEach((i) => revealStage(i, result));
+      return;
+    }
+    [0, 1, 2, 3, 4].forEach((i) => {
+      timers.push(setTimeout(() => revealStage(i, result), i === 0 ? 120 : 120 + i * STEP_MS));
+    });
+  }
+
+  function markStaleIfChanged() {
+    if (!lastRun) return;
+    const changed = Number(els.rsi.value) !== lastRun.rsi || Number(els.sent.value) !== lastRun.sentiment;
+    els.cockpit.classList.toggle('is-stale', changed);
+    if (changed) {
+      els.status.textContent = 'Inputs changed since the last analysis. Run it again to update the signal.';
+    }
+  }
+
+  /* ---------- wiring ---------- */
+  DIALS.forEach((d) => {
+    buildDial(d);
+    updateDial(d);
+    d.input.addEventListener('input', () => {   // live feedback only, never runs the engine
+      updateDial(d);
+      markStaleIfChanged();
+    });
   });
+  buildGauge();
+  resetGauge();
+  setStepper(-1);
 
-  strip.insertAdjacentHTML('afterbegin', lineHtml);
-  ticksContainer.innerHTML = labelHtml;
-}
-
-function updateFusionMarker(score) {
-  const marker = document.getElementById('fusionMarker');
-  const pct = clamp(((score - -100) / 200) * 100, 0, 100);
-  marker.style.left = `${pct}%`;
-  marker.style.opacity = '1';
-}
-
-function updateRecommendation(score, classification) {
-  const badge = document.getElementById('recBadge');
-  const text = document.getElementById('recText');
-  const scoreEl = document.getElementById('scoreValue');
-  const color = colorFor(OUTPUT_COLOR_KEY, classification.key);
-
-  badge.textContent = `${classification.title} · ${classification.sub}`;
-  badge.style.backgroundColor = color;
-  badge.style.color = bestTextColor(color);
-
-  text.innerHTML = `Score net : <strong>${score.toFixed(1)} / 100</strong>. ${classification.text}`;
-
-  scoreEl.textContent = score.toFixed(1);
-  scoreEl.style.color = color;
-}
-
-/* -----------------------------------------------------------------------------
-   9. SCÉNARIOS RAPIDES (PRESETS)
-   ----------------------------------------------------------------------------- */
-
-const PRESETS = [
-  { label: 'Achat Fort', rsi: 15, sent: 85 },
-  { label: 'Vente Forte', rsi: 88, sent: -85 },
-  { label: 'Neutre', rsi: 50, sent: 0 },
-  { label: 'Signaux Contradictoires', rsi: 20, sent: -80 },
-  { label: 'Zone de Transition', rsi: 40, sent: 20 },
-];
-
-function buildPresetButtons() {
-  const container = document.getElementById('presetButtons');
-  container.innerHTML = PRESETS.map(
-    (p, i) => `<button type="button" class="preset-btn" data-index="${i}">${p.label}</button>`
-  ).join('');
-
-  container.querySelectorAll('.preset-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      // Un clic sur un scénario rapide est, comme le bouton "Exécuter", une
-      // action explicite de l'utilisateur : il est donc légitime qu'il
-      // déclenche directement l'analyse (contrairement au simple glissement
-      // d'un slider, qui ne doit jamais lancer le calcul).
-      const p = PRESETS[Number(btn.dataset.index)];
-      document.getElementById('rsiSlider').value = String(p.rsi);
-      document.getElementById('sentSlider').value = String(p.sent);
-      updateReadouts();
+  els.run.addEventListener('click', runAnalysis);
+  Array.prototype.forEach.call(document.querySelectorAll('.chip'), (chip) => {
+    chip.addEventListener('click', () => {
+      els.rsi.value = chip.getAttribute('data-rsi');
+      els.sent.value = chip.getAttribute('data-sent');
+      DIALS.forEach(updateDial);
       runAnalysis();
     });
   });
 }
 
-/* -----------------------------------------------------------------------------
-   10. BOUCLE PRINCIPALE D'ANALYSE
-   ----------------------------------------------------------------------------- */
-
-/** Met à jour uniquement les lectures numériques (readouts) affichées à côté
- *  des sliders. Appelée en continu pendant le glisser-déposer, SANS déclencher
- *  le moteur d'inférence flou (fuzzification / règles / centroïde). */
-function updateReadouts() {
-  const rsi = Number(document.getElementById('rsiSlider').value);
-  const sent = Number(document.getElementById('sentSlider').value);
-  document.getElementById('rsiValue').textContent = String(rsi);
-  document.getElementById('sentValue').textContent = sent > 0 ? `+${sent}` : String(sent);
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initUI);
+  else initUI();
 }
-
-/** Valide les entrées avant exécution. Avec des <input type="range">, le
- *  navigateur ne peut normalement pas produire de valeur vide ou hors bornes,
- *  mais ce garde-fou reste nécessaire pour la robustesse (valeur non
- *  numérique, élément manquant, manipulation programmatique, etc.). */
-function validateInputs(rsiRaw, sentRaw) {
-  if (rsiRaw === '' || rsiRaw === null || sentRaw === '' || sentRaw === null) {
-    return { valid: false, message: 'Veuillez renseigner le RSI et le Sentiment avant d’exécuter l’analyse.' };
-  }
-  const rsi = Number(rsiRaw);
-  const sent = Number(sentRaw);
-  if (Number.isNaN(rsi) || Number.isNaN(sent)) {
-    return { valid: false, message: 'Les valeurs saisies doivent être numériques.' };
-  }
-  if (rsi < 0 || rsi > 100) {
-    return { valid: false, message: 'Le RSI doit être compris entre 0 et 100.' };
-  }
-  if (sent < -100 || sent > 100) {
-    return { valid: false, message: 'Le Sentiment doit être compris entre -100 et +100.' };
-  }
-  return { valid: true, rsi, sent };
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { Engine: Engine };
 }
-
-function showInputError(message) {
-  const el = document.getElementById('inputError');
-  if (!el) return;
-  el.textContent = message;
-  el.classList.add('show');
-}
-
-function clearInputError() {
-  const el = document.getElementById('inputError');
-  if (!el) return;
-  el.textContent = '';
-  el.classList.remove('show');
-}
-
-/** Point d'entrée UNIQUE du moteur d'inférence floue. N'est déclenché que par
- *  une action utilisateur explicite : le bouton "Analyser & Exécuter" ou un
- *  scénario rapide (presets), jamais par le déplacement des sliders ni par
- *  le chargement de la page. */
-function runAnalysis() {
-  const rsiSlider = document.getElementById('rsiSlider');
-  const sentSlider = document.getElementById('sentSlider');
-
-  // Étape 0 — Validation des entrées
-  const validation = validateInputs(rsiSlider.value, sentSlider.value);
-  if (!validation.valid) {
-    showInputError(validation.message);
-    return; // Ne pas exécuter le moteur flou ; résultat précédent conservé.
-  }
-  clearInputError();
-
-  const { rsi, sent } = validation;
-
-  updateReadouts();
-
-  // Étape 1 — Fuzzification
-  const rsiDeg = fuzzify(RSI_SETS, rsi);
-  const sentDeg = fuzzify(SENT_SETS, sent);
-
-  // Étape 2 — Évaluation des règles
-  const ruleResults = evaluateRules(rsiDeg, sentDeg);
-
-  // Étape 3 — Agrégation
-  const outputStrengths = aggregateOutputStrengths(ruleResults);
-  const aggregatedCurve = sampleAggregatedCurve(outputStrengths, 0.5);
-
-  // Étape 4 — Défuzzification
-  const score = defuzzifyCentroid(aggregatedCurve);
-  const classification = classifySignal(score);
-  const categoryColor = colorFor(OUTPUT_COLOR_KEY, classification.key);
-
-  // Rendu — Stage 02
-  document.getElementById('rsiChart').innerHTML = buildMFChartSVG(RSI_SETS, RSI_COLOR_KEY, 0, 100, rsi);
-  document.getElementById('sentChart').innerHTML = buildMFChartSVG(SENT_SETS, SENT_COLOR_KEY, -100, 100, sent);
-  updateDegreeList('rsiDegreeList', RSI_SETS, rsiDeg, RSI_COLOR_KEY);
-  updateDegreeList('sentDegreeList', SENT_SETS, sentDeg, SENT_COLOR_KEY);
-
-  // Rendu — Stage 03
-  updateRuleMatrix(ruleResults);
-  updateActiveRulesList(ruleResults);
-
-  // Rendu — Stage 04
-  updateFusionMarker(score);
-  updateRecommendation(score, classification);
-  document.getElementById('outputChart').innerHTML = buildOutputChartSVG(aggregatedCurve, score, categoryColor);
-}
-
-/* -----------------------------------------------------------------------------
-   10bis. ÉTAT INITIAL (IDLE) — avant toute exécution
-   ----------------------------------------------------------------------------- */
-
-/** Affiche un état "en attente" au chargement de la page : les courbes
- *  d'appartenance de référence sont visibles (pédagogique), mais aucun
- *  calcul flou (fuzzification / règles / centroïde) n'a encore été exécuté.
- *  Satisfait l'exigence "aucun calcul au chargement de la page". */
-function renderIdleState() {
-  updateReadouts();
-
-  // Stage 02 — courbes de référence sans marqueur de valeur courante (pas de fuzzification effectuée)
-  document.getElementById('rsiChart').innerHTML = buildMFChartSVG(RSI_SETS, RSI_COLOR_KEY, 0, 100, null);
-  document.getElementById('sentChart').innerHTML = buildMFChartSVG(SENT_SETS, SENT_COLOR_KEY, -100, 100, null);
-  document.getElementById('rsiDegreeList').innerHTML = '<div class="active-rules-empty">En attente d’exécution — cliquez sur « Analyser &amp; Exécuter ».</div>';
-  document.getElementById('sentDegreeList').innerHTML = '<div class="active-rules-empty">En attente d’exécution — cliquez sur « Analyser &amp; Exécuter ».</div>';
-
-  // Stage 03 — matrice construite mais aucune règle mise en évidence
-  document.getElementById('activeRulesList').innerHTML = '<div class="active-rules-empty">Aucune analyse effectuée pour le moment.</div>';
-
-  // Stage 04 — pas de score ni de recommandation tant qu'aucune exécution n'a eu lieu
-  document.getElementById('fusionMarker').style.opacity = '0';
-  document.getElementById('scoreValue').textContent = '—';
-  document.getElementById('recBadge').textContent = 'EN ATTENTE';
-  document.getElementById('recBadge').style.backgroundColor = COLORS.lineSoft;
-  document.getElementById('recBadge').style.color = COLORS.mist;
-  document.getElementById('recText').textContent = 'Réglez le RSI et le Sentiment, puis cliquez sur « Analyser & Exécuter » pour lancer l’inférence floue.';
-  document.getElementById('outputChart').innerHTML = '';
-}
-
-/* -----------------------------------------------------------------------------
-   11. INITIALISATION
-   ----------------------------------------------------------------------------- */
-
-function init() {
-  COLORS = {
-    cyan: cssVar('--cyan'),
-    indigo: cssVar('--indigo'),
-    violet: cssVar('--violet'),
-    red: cssVar('--red'),
-    redStrong: cssVar('--red-strong'),
-    amber: cssVar('--amber'),
-    green: cssVar('--green'),
-    greenStrong: cssVar('--green-strong'),
-    ink: cssVar('--ink'),
-    mist: cssVar('--mist'),
-    mistDim: cssVar('--mist-dim'),
-    line: cssVar('--line'),
-    lineSoft: cssVar('--line-soft'),
-    bg: cssVar('--bg'),
-    bgAlt: cssVar('--bg-alt'),
-  };
-
-  buildRuleMatrixSkeleton();
-  buildFusionAxis();
-  buildPresetButtons();
-
-  // Les sliders mettent seulement à jour leur lecture numérique en direct ;
-  // ils ne déclenchent JAMAIS le moteur d'inférence flou.
-  document.getElementById('rsiSlider').addEventListener('input', updateReadouts);
-  document.getElementById('sentSlider').addEventListener('input', updateReadouts);
-
-  // Seul le bouton "Analyser & Exécuter" déclenche le calcul.
-  document.getElementById('analyzeBtn').addEventListener('click', runAnalysis);
-
-  // Aucun calcul au chargement de la page — état d'attente uniquement.
-  renderIdleState();
-}
-
-document.addEventListener('DOMContentLoaded', init);
